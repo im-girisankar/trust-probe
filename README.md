@@ -37,6 +37,8 @@ white-box probe (sim.)    0.835
 
 ## Validated result (real, on GPU)
 
+> Full report + methodology + limitations: **[RESULTS.md](RESULTS.md)**
+
 A linear probe on **Qwen2.5-7B-Instruct** layer-19 activations detects **TruthfulQA**
 hallucinations (correct vs incorrect answers) at **AUROC 0.916 (95% CI [0.898, 0.931])**,
 N = 1000. The signal localizes to the **mid-late layers** — AUROC climbs from 0.745 at layer 10
