@@ -59,11 +59,15 @@ print(f"{len(examples)} examples  |  positives(halluc)={int(y.sum())}  negatives
 # ---------------- model ----------------
 print(f"Loading {MODEL_ID} ...")
 tok = AutoTokenizer.from_pretrained(MODEL_ID)
-kw = dict(output_hidden_states=True, torch_dtype=torch.bfloat16, device_map="auto")
+kw = dict(output_hidden_states=True, device_map="auto")
 if LOAD_8BIT:
-    kw.update(load_in_8bit=True); kw.pop("torch_dtype")
+    from transformers import BitsAndBytesConfig
+    kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)  # modern API
+else:
+    kw["torch_dtype"] = torch.bfloat16
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, **kw)
 model.eval()
+DEV = next(model.parameters()).device
 n_layers_total = model.config.num_hidden_layers
 if LAYERS is None:
     lo = max(1, n_layers_total // 2 - 4); LAYERS = range(lo, min(n_layers_total, lo + 16))
@@ -77,8 +81,8 @@ def features(q, a):
     prompt = f"Question: {q}\nAnswer:"
     full = prompt + " " + a
     p_ids = tok(prompt, return_tensors="pt").input_ids
-    f_ids = tok(full, return_tensors="pt").input_ids.to(model.device)
-    out = model(f_ids)
+    f_ids = tok(full, return_tensors="pt").input_ids.to(DEV)
+    out = model(f_ids, output_hidden_states=True)
     hs = out.hidden_states  # tuple (n_layers+1) of [1, seq, H]
     last = f_ids.shape[1] - 1
     vecs = np.stack([hs[li][0, last].float().cpu().numpy() for li in LAYERS])  # [L, H]
