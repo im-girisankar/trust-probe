@@ -30,8 +30,12 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 # ---------------- config ----------------
-MODEL_ID  = "Qwen/Qwen2.5-7B-Instruct"   # thesis model: "meta-llama/Llama-3.1-8B-Instruct" + LAYERS=range(8,24)
-LOAD_8BIT = True
+# Interactive runs default to 7B in 8-bit (the headline result). Kaggle BATCH/CI
+# runs default to 3B in bf16 — bf16 avoids the bitsandbytes-vs-batch-CUDA segfault
+# and a 3B model fits any 16 GB GPU comfortably. Override via TP_MODEL / TP_8BIT.
+_BATCH    = os.environ.get("KAGGLE_KERNEL_RUN_TYPE", "").lower() == "batch"
+MODEL_ID  = os.environ.get("TP_MODEL", "Qwen/Qwen2.5-3B-Instruct" if _BATCH else "Qwen/Qwen2.5-7B-Instruct")
+LOAD_8BIT = os.environ.get("TP_8BIT", "0" if _BATCH else "1") == "1"
 N_PAIRS   = 500
 LAYERS    = None
 SEED      = 7
