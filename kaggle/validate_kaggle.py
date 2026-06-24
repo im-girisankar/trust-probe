@@ -135,7 +135,7 @@ print(f"  -> best layer = {LAYERS[best_j]} (AUROC {layer_auc[best_j]:.3f})")
 
 # black-box-ish baseline: higher hallucination risk when answer is less likely
 bb_scores = (-logprobs)
-bb_scores = (bb_scores - bb_scores.min()) / (bb_scores.ptp() + 1e-9)
+bb_scores = (bb_scores - bb_scores.min()) / (np.ptp(bb_scores) + 1e-9)
 
 # fusion of [white-box probe score, baseline]
 Xf = np.column_stack([wb_scores, bb_scores])
