@@ -41,7 +41,7 @@ torch.manual_seed(SEED)
 
 # ---------------- data: TruthfulQA -> labeled (Q, A, hallucination?) -------
 print("Loading TruthfulQA ...")
-ds = load_dataset("truthful_qa", "generation")["validation"]
+ds = load_dataset("truthfulqa/truthful_qa", "generation")["validation"]
 examples = []
 for row in ds:
     q = row["question"]
