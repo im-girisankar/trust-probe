@@ -1,0 +1,66 @@
+name: kaggle-validate
+
+# Push code -> GitHub Actions -> Kaggle API runs the validation kernel on a real
+# GPU -> the kernel log (per-layer AUROC + the probe/logprob/fusion leaderboard)
+# is pulled back into this Actions run. Only fires when the kaggle/ folder changes
+# or when triggered manually, so it doesn't burn the weekly GPU quota.
+on:
+  push:
+    paths:
+      - "kaggle/**"
+      - ".github/workflows/kaggle.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install --quiet kaggle
+
+      - name: Push kernel and stream its result
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          set -e
+          : "${KAGGLE_USERNAME:?set the KAGGLE_USERNAME repo secret}"
+          : "${KAGGLE_KEY:?set the KAGGLE_KEY repo secret}"
+
+          # Fill the username into the kernel id (kept out of the committed file).
+          sed -i "s/KAGGLE_USERNAME_PLACEHOLDER/${KAGGLE_USERNAME}/" kaggle/kernel-metadata.json
+          SLUG="${KAGGLE_USERNAME}/trust-probe-validate"
+
+          echo "Pushing kernel ${SLUG} ..."
+          kaggle kernels push -p kaggle
+
+          echo "Polling for completion (up to ~30 min) ..."
+          for i in $(seq 1 60); do
+            sleep 30
+            STATUS="$(kaggle kernels status "$SLUG" 2>/dev/null | tr -d '\r')"
+            echo "  [$i] $STATUS"
+            echo "$STATUS" | grep -qiE "complete|error|cancelAcknowledged" && break
+          done
+
+          echo "::group::Kernel output"
+          kaggle kernels output "$SLUG" -p kaggle_out || true
+          cat kaggle_out/*.log 2>/dev/null | tail -120 || echo "(no log file returned)"
+          echo "::endgroup::"
+
+          echo "$STATUS" | grep -qi "error" && { echo "Kernel reported an error"; exit 1; } || true
+
+      - name: Upload kernel artifacts (log + plot)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-output
+          path: kaggle_out
+          if-no-files-found: ignore
