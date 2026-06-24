@@ -1,15 +1,14 @@
 # =====================================================================
 # trust-probe — real validation on a GPU (Kaggle or Colab). Copy-paste one cell.
 # =====================================================================
-# Setup: GPU runtime + internet ON. Then run.
+# Setup: GPU runtime + internet ON, then run.
 #
-# RESUMABLE: after the (expensive) activation extraction it caches features to
-# `trustprobe_features.npz`. Re-running in the same session SKIPS model loading +
-# extraction and goes straight to the leaderboard. Delete the .npz to force a
-# fresh extraction.
+# RESUMABLE: caches features to `trustprobe_features_v2.npz` after extraction;
+# re-running in the same session skips model load + extraction.
 #
-# Output: per-layer white-box AUROC + a probe / logprob-baseline / FUSION
-# leaderboard with bootstrap 95% CIs, and a layer-AUROC plot.
+# Outputs per-layer white-box AUROC + a leaderboard comparing the white-box
+# probe, a P(True) self-eval black-box signal, a logprob baseline, and their
+# FUSION, each with bootstrap 95% CIs; saves a layer-AUROC plot.
 # Labels: TruthfulQA correct (faithful=0) vs incorrect (hallucination=1).
 # =====================================================================
 
@@ -17,9 +16,8 @@ import importlib.util
 import subprocess, sys
 def pip(*pkgs): subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=True)
 pip("transformers>=4.46", "accelerate>=0.30", "datasets>=2.19", "scikit-learn>=1.3")
-# Use the environment's existing bitsandbytes if present (Kaggle ships one built
-# for its CUDA). Only install when missing — upgrading over it causes a CUDA
-# symbol mismatch / segfault on Kaggle's batch kernels.
+# Keep the environment's CUDA-matched bitsandbytes (Kaggle ships one); installing
+# over it causes a CUDA-symbol-mismatch segfault. Only install when missing.
 if importlib.util.find_spec("bitsandbytes") is None:
     pip("bitsandbytes")
 
@@ -37,14 +35,14 @@ LOAD_8BIT = True
 N_PAIRS   = 500
 LAYERS    = None
 SEED      = 7
-CACHE     = os.environ.get("TP_CACHE", "trustprobe_features.npz")
+CACHE     = os.environ.get("TP_CACHE", "trustprobe_features_v2.npz")
 rng = np.random.default_rng(SEED); torch.manual_seed(SEED)
 
 # ---------------- extract OR resume from cache ----------------
 if os.path.exists(CACHE):
     print(f"Resuming from cache {CACHE} (skipping model load + extraction) ...")
     d = np.load(CACHE)
-    X_layers, logprobs, y = d["X"], d["logprobs"], d["y"]
+    X_layers, logprobs, ptrue, y = d["X"], d["logprobs"], d["ptrue"], d["y"]
     LAYERS = [int(v) for v in d["LAYERS"]]
     print(f"  {len(y)} examples | layers {LAYERS[0]}..{LAYERS[-1]}")
 else:
@@ -84,6 +82,17 @@ else:
     LAYERS = list(LAYERS)
     print(f"model layers={n_total}, probing layers {LAYERS[0]}..{LAYERS[-1]}")
 
+    def _first_ids(words):
+        ids = set()
+        for w in words:
+            for variant in (w, " " + w):
+                t = tok(variant, add_special_tokens=False).input_ids
+                if t:
+                    ids.add(t[0])
+        return list(ids)
+    YES_IDS = _first_ids(["Yes", "yes", "YES"])
+    NO_IDS = _first_ids(["No", "no", "NO"])
+
     @torch.no_grad()
     def features(q, a):
         prompt = f"Question: {q}\nAnswer:"
@@ -94,24 +103,32 @@ else:
         hs = out.hidden_states
         last = f_ids.shape[1] - 1
         vecs = np.stack([hs[li][0, last].float().cpu().numpy() for li in LAYERS])
-        logits = out.logits[0].float()
-        logp = torch.log_softmax(logits, dim=-1)
+        logp = torch.log_softmax(out.logits[0].float(), dim=-1)
         ans_start = p_ids.shape[1]
         tok_lp = [logp[t - 1, f_ids[0, t]].item() for t in range(ans_start, f_ids.shape[1])]
-        return vecs, (float(np.mean(tok_lp)) if tok_lp else -20.0)
+        mean_lp = float(np.mean(tok_lp)) if tok_lp else -20.0
+        # P(True): ask the model whether its own answer is correct.
+        judge = (f"Question: {q}\nProposed answer: {a}\n"
+                 "Is the proposed answer factually correct? Answer yes or no.\nAnswer:")
+        j_ids = tok(judge, return_tensors="pt").input_ids.to(DEV)
+        jp = torch.softmax(model(j_ids).logits[0, -1].float(), dim=-1)
+        p_yes = float(jp[YES_IDS].sum()); p_no = float(jp[NO_IDS].sum())
+        ptrue_risk = p_no / (p_yes + p_no + 1e-9)  # high -> model judges it wrong -> hallucination
+        return vecs, mean_lp, ptrue_risk
 
-    print("Extracting activations (GPU-heavy) ...")
-    X_layers, logprobs = [], []
+    print("Extracting activations + P(True) (GPU-heavy) ...")
+    X_layers, logprobs, ptrue = [], [], []
     for i, (q, a, _) in enumerate(examples):
-        v, lp = features(q, a)
-        X_layers.append(v); logprobs.append(lp)
+        v, lp, pt = features(q, a)
+        X_layers.append(v); logprobs.append(lp); ptrue.append(pt)
         if (i + 1) % 100 == 0: print(f"  {i+1}/{len(examples)}")
-    X_layers = np.stack(X_layers); logprobs = np.array(logprobs)
-    np.savez(CACHE, X=X_layers, logprobs=logprobs, y=y, LAYERS=np.array(LAYERS))
-    print(f"Saved feature cache -> {CACHE} (re-run to resume from here)")
+    X_layers = np.stack(X_layers); logprobs = np.array(logprobs); ptrue = np.array(ptrue)
+    np.savez(CACHE, X=X_layers, logprobs=logprobs, ptrue=ptrue, y=y, LAYERS=np.array(LAYERS))
+    print(f"Saved feature cache -> {CACHE}")
 
 # ---------------- evaluation (fast CPU; runs cached or fresh) ----------------
 def cv_scores(Xf, y, seed=SEED):
+    Xf = np.atleast_2d(Xf.T).T if Xf.ndim == 1 else Xf
     oof = np.zeros(len(y))
     for tr, te in StratifiedKFold(5, shuffle=True, random_state=seed).split(Xf, y):
         clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, C=1.0))
@@ -132,24 +149,29 @@ for j, li in enumerate(LAYERS):
     a = roc_auc_score(y, cv_scores(X_layers[:, j, :], y)); layer_auc.append(a)
     print(f"  layer {li:2d}: AUROC {a:.3f}")
 best_j = int(np.argmax(layer_auc))
-wb_scores = cv_scores(X_layers[:, best_j, :], y)
+wb = cv_scores(X_layers[:, best_j, :], y)
 print(f"  -> best layer = {LAYERS[best_j]} (AUROC {layer_auc[best_j]:.3f})")
 
-bb_scores = -np.asarray(logprobs)
-bb_scores = (bb_scores - bb_scores.min()) / (np.ptp(bb_scores) + 1e-9)
-fused = cv_scores(np.column_stack([wb_scores, bb_scores]), y)
+# black-box signals (both are hallucination-risk scores, higher = worse)
+lp = -np.asarray(logprobs); lp = (lp - lp.min()) / (np.ptp(lp) + 1e-9)
+pt = np.asarray(ptrue)
+fuse_pt = cv_scores(np.column_stack([wb, pt]), y)
+fuse_all = cv_scores(np.column_stack([wb, pt, lp]), y)
 
-rows = [
-    ("white-box probe (best layer)", roc_auc_score(y, wb_scores), boot_ci(y, wb_scores)),
-    ("answer-logprob baseline",       roc_auc_score(y, bb_scores), boot_ci(y, bb_scores)),
-    ("FUSION (WB + baseline)",        roc_auc_score(y, fused),     boot_ci(y, fused)),
+board = [
+    ("white-box probe (best layer)", wb),
+    ("P(True) self-eval", pt),
+    ("logprob baseline", lp),
+    ("FUSION (WB + P(True))", fuse_pt),
+    ("FUSION (WB + P(True) + logprob)", fuse_all),
 ]
-rows.sort(key=lambda r: r[1], reverse=True)
+rows = sorted(((n, roc_auc_score(y, s), boot_ci(y, s)) for n, s in board),
+              key=lambda r: r[1], reverse=True)
 print("\n================ trust-probe REAL leaderboard ================")
 print(f"model={MODEL_ID}  N={len(y)}  dataset=TruthfulQA  best_layer={LAYERS[best_j]}")
-print(f"{'Detector':<32} {'AUROC':>7}   95% CI")
+print(f"{'Detector':<34} {'AUROC':>7}   95% CI")
 for name, auc, (lo, hi) in rows:
-    print(f"{name:<32} {auc:>7.3f}   [{lo:.3f}, {hi:.3f}]")
+    print(f"{name:<34} {auc:>7.3f}   [{lo:.3f}, {hi:.3f}]")
 print(f"\nTop detector: {rows[0][0]}")
 
 try:
