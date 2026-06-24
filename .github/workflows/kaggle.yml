@@ -43,7 +43,7 @@ jobs:
 
           # Fill the username into the kernel id (kept out of the committed file).
           sed -i "s/KAGGLE_USERNAME_PLACEHOLDER/${KAGGLE_USERNAME}/" kaggle/kernel-metadata.json
-          SLUG="${KAGGLE_USERNAME}/trust-probe-validate"
+          SLUG="${KAGGLE_USERNAME}/trust-probe-validation"
 
           echo "Pushing kernel ${SLUG} ..."
           kaggle kernels push -p kaggle

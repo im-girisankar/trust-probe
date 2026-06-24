@@ -13,9 +13,15 @@
 # Labels: TruthfulQA correct (faithful=0) vs incorrect (hallucination=1).
 # =====================================================================
 
+import importlib.util
 import subprocess, sys
 def pip(*pkgs): subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=True)
-pip("transformers>=4.46", "accelerate>=0.30", "datasets>=2.19", "scikit-learn>=1.3", "bitsandbytes>=0.43")
+pip("transformers>=4.46", "accelerate>=0.30", "datasets>=2.19", "scikit-learn>=1.3")
+# Use the environment's existing bitsandbytes if present (Kaggle ships one built
+# for its CUDA). Only install when missing — upgrading over it causes a CUDA
+# symbol mismatch / segfault on Kaggle's batch kernels.
+if importlib.util.find_spec("bitsandbytes") is None:
+    pip("bitsandbytes")
 
 import os
 import numpy as np, torch

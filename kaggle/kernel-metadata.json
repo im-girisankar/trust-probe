@@ -1,6 +1,6 @@
 {
-  "id": "KAGGLE_USERNAME_PLACEHOLDER/trust-probe-validate",
-  "title": "trust-probe validation",
+  "id": "KAGGLE_USERNAME_PLACEHOLDER/trust-probe-validation",
+  "title": "trust-probe-validation",
   "code_file": "validate_kaggle.py",
   "language": "python",
   "kernel_type": "script",
